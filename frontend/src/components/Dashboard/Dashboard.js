@@ -1,55 +1,57 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
+import { dataService } from '../../services/DataService';
+
+const API_BASE = process.env.REACT_APP_API_URL || process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
 
 const Dashboard = () => {
-  const { user, profile, signOut } = useAuth();
+  const { user, profile } = useAuth();
   const navigate = useNavigate();
   const [dashboardData, setDashboardData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('overview');
+  const [insights, setInsights] = useState(null);
+  const [forecast, setForecast] = useState(null);
+  const [lastFetchTime, setLastFetchTime] = useState(null);
+  const [creatingSampleData, setCreatingSampleData] = useState(false);
 
-  useEffect(() => {
-    if (user) {
-      fetchDashboardData();
+  const fetchDashboardData = useCallback(async (forceRefresh = false) => {
+    if (!user) return;
+    
+    // Don't refetch if data was fetched recently (within 30 seconds) unless forced
+    const now = Date.now();
+    if (!forceRefresh && lastFetchTime && (now - lastFetchTime) < 30000) {
+      return;
     }
-  }, [user]);
-
-  const fetchDashboardData = async () => {
+    
     try {
       setLoading(true);
       setError(null);
 
-      // Fetch accounts
-      const { data: accounts, error: accountsError } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+      // Set a timeout for the entire operation
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timeout')), 8000)
+      );
 
-      if (accountsError) throw accountsError;
+      const fetchData = async () => {
+        // Use the new data service for better abstraction and future Plaid integration
+        const [accounts, transactions, goals] = await Promise.allSettled([
+          dataService.getAccounts(user.id),
+          dataService.getTransactions(user.id, { limit: 10 }),
+          dataService.getGoals(user.id)
+        ]);
 
-      // Fetch transactions
-      const { data: transactions, error: transactionsError } = await supabase
-        .from('transactions')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(10);
+        return {
+          accounts: accounts.status === 'fulfilled' ? accounts.value : [],
+          transactions: transactions.status === 'fulfilled' ? transactions.value : [],
+          goals: goals.status === 'fulfilled' ? goals.value : []
+        };
+      };
 
-      if (transactionsError) throw transactionsError;
-
-      // Fetch goals
-      const { data: goals, error: goalsError } = await supabase
-        .from('financial_goals')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('is_active', true)
-        .order('created_at', { ascending: false });
-
-      if (goalsError) throw goalsError;
+      const { accounts, transactions, goals } = await Promise.race([fetchData(), timeoutPromise]);
 
       // Calculate summary
       const totalBalance = accounts?.reduce((sum, account) => sum + parseFloat(account.balance || 0), 0) || 0;
@@ -75,11 +77,91 @@ const Dashboard = () => {
         category_spending: categorySpending
       });
 
+      // Fetch AI insights and goal forecast (non-blocking)
+      Promise.all([
+        fetch(`${API_BASE}/api/users/${user.id}/insights`, { 
+          signal: AbortSignal.timeout(5000) 
+        }).then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch(`${API_BASE}/api/users/${user.id}/goal-forecast`, { 
+          signal: AbortSignal.timeout(5000) 
+        }).then(r => r.ok ? r.json() : null).catch(() => null)
+      ]).then(([insightsRes, forecastRes]) => {
+        if (insightsRes) setInsights(insightsRes);
+        if (forecastRes) setForecast(forecastRes);
+      }).catch(() => {
+        // Non-fatal - AI features will show fallback data
+      });
+
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
+      
+      // If it's a timeout or network error, show fallback data
+      if (error.message === 'Request timeout' || error.name === 'NetworkError') {
+        setDashboardData({
+          accounts: [],
+          transactions: [],
+          goals: [],
+          summary: {
+            total_balance: 0,
+            total_spent: 0,
+            net_cashflow: 0,
+            transaction_count: 0
+          },
+          category_spending: {}
+        });
+        setError('Connection timeout - showing cached data');
+      } else {
       setError(error.message);
+      }
     } finally {
       setLoading(false);
+      setLastFetchTime(Date.now());
+    }
+  }, [user, lastFetchTime]);
+
+  useEffect(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
+
+  // Prevent unnecessary re-fetches when switching browser tabs
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && user) {
+        // Only refetch if it's been more than 5 minutes since last fetch
+        const now = Date.now();
+        if (!lastFetchTime || (now - lastFetchTime) > 300000) {
+          fetchDashboardData(true);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [user, lastFetchTime, fetchDashboardData]);
+
+  const createSampleData = async () => {
+    if (!user) return;
+    
+    setCreatingSampleData(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/users/${user.id}/sample-data`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      if (response.ok) {
+        // Refresh dashboard data after creating sample data
+        await fetchDashboardData(true);
+      } else {
+        throw new Error('Failed to create sample data');
+      }
+    } catch (error) {
+      console.error('Error creating sample data:', error);
+      setError('Failed to create sample data. Please try again.');
+    } finally {
+      setCreatingSampleData(false);
     }
   };
 
@@ -112,21 +194,6 @@ const Dashboard = () => {
       other: '📋'
     };
     return icons[category] || icons.other;
-  };
-
-  const getCategoryColor = (category) => {
-    const colors = {
-      food: 'from-orange-400 to-orange-500',
-      transportation: 'from-blue-400 to-blue-500',
-      entertainment: 'from-purple-400 to-purple-500',
-      utilities: 'from-green-400 to-green-500',
-      shopping: 'from-pink-400 to-pink-500',
-      healthcare: 'from-red-400 to-red-500',
-      housing: 'from-indigo-400 to-indigo-500',
-      home: 'from-yellow-400 to-yellow-500',
-      other: 'from-gray-400 to-gray-500'
-    };
-    return colors[category] || colors.other;
   };
 
   if (loading) {
@@ -191,6 +258,15 @@ const Dashboard = () => {
                 <p className="text-sm text-gray-500 font-medium">Welcome back</p>
                 <p className="text-base font-semibold text-gray-900">{profile?.display_name || profile?.first_name || 'User'}</p>
               </div>
+              <button
+                onClick={() => fetchDashboardData(true)}
+                className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-xl flex items-center justify-center text-gray-600 hover:text-gray-800 transition-all duration-200"
+                title="Refresh data"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
               <div className="relative">
                 <button
                   onClick={() => navigate('/profile')}
@@ -229,6 +305,26 @@ const Dashboard = () => {
             >
               Goals
             </button>
+            <button
+              onClick={() => setActiveTab('insights')}
+              className={`px-6 py-4 font-medium text-sm transition-all duration-200 border-b-2 ${
+                activeTab === 'insights'
+                  ? 'border-blue-500 text-blue-600 bg-blue-50/50'
+                  : 'border-transparent text-gray-600 hover:text-gray-900 hover:bg-gray-50/50'
+              }`}
+            >
+              Insights
+            </button>
+            <button
+              onClick={() => setActiveTab('forecast')}
+              className={`px-6 py-4 font-medium text-sm transition-all duration-200 border-b-2 ${
+                activeTab === 'forecast'
+                  ? 'border-blue-500 text-blue-600 bg-blue-50/50'
+                  : 'border-transparent text-gray-600 hover:text-gray-900 hover:bg-gray-50/50'
+              }`}
+            >
+              Forecast
+            </button>
           </nav>
         </div>
       </div>
@@ -237,6 +333,35 @@ const Dashboard = () => {
       <main className="max-w-7xl mx-auto px-6 lg:px-8 py-8">
         {activeTab === 'overview' && dashboardData && (
           <div className="space-y-8">
+            {/* Show sample data creation for new users */}
+            {dashboardData.accounts.length === 0 && dashboardData.transactions.length === 0 && (
+              <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-3xl border border-blue-100 p-8">
+                <div className="text-center">
+                  <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-xl font-bold text-gray-900 mb-2">Welcome to Smart Financial Coach!</h3>
+                  <p className="text-gray-600 mb-6">Get started by creating sample data to explore all the AI-powered features and insights.</p>
+                  <button
+                    onClick={createSampleData}
+                    disabled={creatingSampleData}
+                    className="bg-gradient-to-r from-blue-500 to-purple-600 text-white px-8 py-3 rounded-xl font-semibold hover:shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {creatingSampleData ? (
+                      <div className="flex items-center">
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                        Creating Sample Data...
+                      </div>
+                    ) : (
+                      'Create Sample Data'
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Summary Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {/* Total Balance */}
@@ -343,14 +468,20 @@ const Dashboard = () => {
                 </div>
                 <div className="space-y-4">
                   {dashboardData.transactions.map(transaction => (
-                    <div key={transaction.id} className="flex items-center justify-between p-4 hover:bg-gray-50 rounded-xl transition-colors">
-                      <div className="flex items-center">
-                        <div className="w-10 h-10 bg-gradient-to-r from-gray-100 to-gray-200 rounded-xl flex items-center justify-center text-lg mr-4">
+                    <div key={transaction.id} className="flex items-start justify-between p-4 hover:bg-gray-50 rounded-xl transition-colors">
+                      <div className="flex items-start">
+                        <div className="w-10 h-10 bg-gradient-to-r from-gray-100 to-gray-200 rounded-xl flex items-center justify-center text-lg mr-4 mt-1">
                           {getCategoryIcon(transaction.ai_category || transaction.category)}
                         </div>
                         <div>
                           <p className="font-semibold text-gray-900">{transaction.description}</p>
                           <p className="text-sm text-gray-500">{formatDate(transaction.created_at)}</p>
+                          {transaction.ai_insights?.insight && (
+                            <p className="text-sm text-blue-700 mt-1">💡 {transaction.ai_insights.insight}</p>
+                          )}
+                          {transaction.ai_insights?.tip && transaction.ai_insights.tip.trim() !== '' && (
+                            <p className="text-xs text-gray-600 mt-1">Tip: {transaction.ai_insights.tip}</p>
+                          )}
                         </div>
                       </div>
                       <p className="font-bold text-red-600">
@@ -361,6 +492,69 @@ const Dashboard = () => {
                 </div>
               </div>
             </div>
+
+            {/* Quick Insights Summary */}
+            {insights && insights.insights && insights.insights.length > 0 && (
+              <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-bold text-gray-900">Quick Insights</h3>
+                  <button 
+                    onClick={() => setActiveTab('insights')}
+                    className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    View All →
+                  </button>
+                </div>
+                <div className="grid md:grid-cols-3 gap-4">
+                  {insights.insights.slice(0, 3).map((i) => (
+                    <div key={i.category} className="border border-gray-100 rounded-2xl p-4 hover:bg-gray-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold capitalize text-sm">{i.category}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${
+                          i.trend === 'increasing' ? 'bg-red-100 text-red-700' : 
+                          i.trend === 'decreasing' ? 'bg-green-100 text-green-700' : 
+                          'bg-gray-100 text-gray-700'
+                        }`}>{i.trend}</span>
+                      </div>
+                      <p className="text-sm text-gray-600">{formatCurrency(i.total_amount)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Goals Summary */}
+            {forecast && forecast.forecasts && forecast.forecasts.length > 0 && (
+              <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-bold text-gray-900">Goals Progress</h3>
+                  <button 
+                    onClick={() => setActiveTab('forecast')}
+                    className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    View Details →
+                  </button>
+                </div>
+                <div className="space-y-4">
+                  {forecast.forecasts.slice(0, 2).map((f) => (
+                    <div key={f.goal_id} className="border border-gray-100 rounded-2xl p-4 hover:bg-gray-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold">{f.title}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${
+                          f.status === 'on_track' ? 'bg-green-100 text-green-800' : 
+                          f.status === 'moderate_track' ? 'bg-yellow-100 text-yellow-800' :
+                          'bg-red-100 text-red-800'
+                        }`}>{f.status.replace('_',' ')}</span>
+                      </div>
+                      <div className="flex justify-between text-sm text-gray-600">
+                        <span>Progress: {formatCurrency(f.current_amount || 0)} / {formatCurrency(f.target_amount || 0)}</span>
+                        <span>{f.months_needed ? `${f.months_needed.toFixed(1)} months` : '—'}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -429,6 +623,120 @@ const Dashboard = () => {
                 </div>
                 <h3 className="text-xl font-semibold text-gray-900 mb-4">No Goals Set Yet</h3>
                 <p className="text-gray-600 mb-8">Set your first financial goal to start tracking your progress</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'insights' && (
+          <div className="space-y-8">
+            {insights ? (
+              <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-bold text-gray-900">Intelligent Spending Insights</h3>
+                  {insights.anomalies_present && (
+                    <span className="text-sm px-3 py-1 rounded-full bg-yellow-100 text-yellow-800">Potential anomalies detected</span>
+                  )}
+                </div>
+                <div className="grid md:grid-cols-2 gap-6">
+                  {insights.insights.map((i) => (
+                    <div key={i.category} className="border border-gray-100 rounded-2xl p-4 hover:bg-gray-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold capitalize">{i.category}</span>
+                        <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-700">{i.trend}</span>
+                      </div>
+                      <p className="text-sm text-gray-600 mb-2">Spent: {formatCurrency(i.total_amount)} across {i.transaction_count} txns</p>
+                      <p className="text-sm text-blue-700">{i.ai_recommendation}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-600">Loading insights or none available.</p>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'forecast' && (
+          <div className="space-y-8">
+            {forecast ? (
+              <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-bold text-gray-900">Goal Forecast & Analysis</h3>
+                  <div className="text-right">
+                    <p className="text-sm text-gray-600">Monthly savings estimate</p>
+                    <p className="text-lg font-semibold text-gray-900">{formatCurrency(forecast.monthly_savings_estimate || 0)}</p>
+                  </div>
+                </div>
+                
+                {forecast.forecasts && forecast.forecasts.length > 0 ? (
+                  <div className="space-y-6">
+                    {forecast.forecasts.map((f) => (
+                      <div key={f.goal_id} className="border border-gray-100 rounded-2xl p-6 hover:bg-gray-50 transition-colors">
+                        <div className="flex items-center justify-between mb-4">
+                          <div>
+                            <h4 className="text-lg font-semibold text-gray-900">{f.title}</h4>
+                            <p className="text-sm text-gray-600">Target: {formatCurrency(f.target_amount || 0)}</p>
+                          </div>
+                          <span className={`text-sm px-3 py-1 rounded-full font-medium ${
+                            f.status === 'on_track' ? 'bg-green-100 text-green-800' : 
+                            f.status === 'moderate_track' ? 'bg-yellow-100 text-yellow-800' :
+                            f.status === 'no_savings' ? 'bg-red-100 text-red-800' :
+                            'bg-gray-100 text-gray-800'
+                          }`}>
+                            {f.status.replace('_', ' ')}
+                          </span>
+                        </div>
+                        
+                        <div className="grid md:grid-cols-3 gap-4 mb-4">
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-blue-600">{formatCurrency(f.current_amount || 0)}</p>
+                            <p className="text-sm text-gray-600">Current</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-gray-900">{formatCurrency(f.remaining || 0)}</p>
+                            <p className="text-sm text-gray-600">Remaining</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-purple-600">
+                              {f.months_needed ? `${f.months_needed.toFixed(1)}` : '—'}
+                            </p>
+                            <p className="text-sm text-gray-600">Months</p>
+                          </div>
+                        </div>
+                        
+                        <div className="bg-blue-50 rounded-xl p-4">
+                          <h5 className="font-semibold text-blue-900 mb-2">AI Guidance</h5>
+                          <p className="text-sm text-blue-800 whitespace-pre-line">{f.ai_guidance}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <h4 className="text-lg font-semibold text-gray-900 mb-2">No Financial Goals Set</h4>
+                    <p className="text-gray-600 mb-6">Set your first financial goal to get personalized forecasts and AI guidance.</p>
+                    <button 
+                      onClick={() => setActiveTab('goals')}
+                      className="bg-gradient-to-r from-blue-500 to-purple-600 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-lg transition-all duration-200"
+                    >
+                      Create Your First Goal
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8">
+                <div className="text-center py-12">
+                  <div className="w-16 h-16 border-4 border-gray-200 border-t-blue-500 rounded-full animate-spin mx-auto mb-4"></div>
+                  <h4 className="text-lg font-semibold text-gray-900 mb-2">Analyzing Your Goals</h4>
+                  <p className="text-gray-600">Generating personalized forecasts and recommendations...</p>
+                </div>
               </div>
             )}
           </div>

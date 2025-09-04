@@ -54,7 +54,7 @@ const GOAL_TEMPLATES = [
 ];
 
 const FinancialGoals = ({ onNext, onBack }) => {
-  const { user, updateProfile } = useAuth();
+  const { user } = useAuth();
   const [selectedGoals, setSelectedGoals] = useState([]);
   const [customGoals, setCustomGoals] = useState([]);
   const [showCustomForm, setShowCustomForm] = useState(false);

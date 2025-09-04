@@ -11,6 +11,7 @@ const OnboardingFlow = () => {
   const { user, profile, loading } = useAuth();
   const [currentStep, setCurrentStep] = useState('welcome');
   const [onboardingData, setOnboardingData] = useState({});
+  // Remove timeout fallbacks for professional behavior
 
   useEffect(() => {
     if (!loading) {

@@ -201,6 +201,57 @@ class FinancialAI:
                 "insight": "Transaction recorded successfully",
                 "tip": ""
             }
+
+    async def forecast_goal_progress(self, monthly_savings: float, target_amount: float, current_amount: float) -> Dict[str, Any]:
+        """Enhanced forecast and AI guidance for goal progress."""
+        try:
+            remaining = max(target_amount - current_amount, 0)
+            months_needed = float('inf') if monthly_savings <= 0 else remaining / monthly_savings
+            
+            # More nuanced status determination
+            if monthly_savings <= 0:
+                status = "no_savings"
+            elif months_needed <= 6:
+                status = "on_track"
+            elif months_needed <= 12:
+                status = "moderate_track"
+            else:
+                status = "off_track"
+            
+            prompt = f"""
+            You are a supportive financial coach helping someone reach their financial goal.
+
+            GOAL PROGRESS:
+            Current amount saved: ${current_amount:.2f}
+            Target amount: ${target_amount:.2f}
+            Amount remaining: ${remaining:.2f}
+            Current monthly savings rate: ${monthly_savings:.2f}
+            Estimated months to reach goal: {"infinite (no savings)" if months_needed == float('inf') else f"{months_needed:.1f} months"}
+            Status: {status.replace('_', ' ')}
+
+            TASK: Provide specific, actionable guidance based on their situation:
+            - If on track: 2 tips to maintain momentum
+            - If off track: 2 specific ways to increase savings rate
+            - If no savings: 2 concrete steps to start saving
+
+            Be encouraging, concise, specific, and focus on actionable steps. Include specific dollar amounts or percentages where possible.
+            Keep it conversational and motivating.
+            """
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            return {
+                "remaining": remaining,
+                "months_needed": None if months_needed == float('inf') else months_needed,
+                "status": status,
+                "ai_guidance": response.text.strip()
+            }
+        except Exception as e:
+            print(f"Goal forecast error: {e}")
+            return {
+                "remaining": max(target_amount - current_amount, 0),
+                "months_needed": None,
+                "status": "unknown",
+                "ai_guidance": "Track your spending for a month to estimate savings, then identify 2 categories where you can cut back to free up cash toward your goal."
+            }
     
     async def generate_spending_insights(self, user_id: str, transactions: List[Transaction]) -> List[SpendingInsight]:
         """Generate AI-powered spending insights for a user"""
@@ -210,7 +261,7 @@ class FinancialAI:
             total_spending = 0
             
             for transaction in transactions:
-                if transaction.transaction_type == "debit":
+                if transaction.transaction_type in ["debit", "payment", "withdrawal"]:
                     category = transaction.ai_category or transaction.category or "other"
                     category_spending[category] = category_spending.get(category, [])
                     category_spending[category].append(transaction.amount)
@@ -221,23 +272,38 @@ class FinancialAI:
                 total_amount = sum(amounts)
                 avg_transaction = total_amount / len(amounts)
                 
+                # Enhanced trend analysis
+                trend = "stable"
+                if len(amounts) >= 3:
+                    recent_avg = sum(amounts[-3:]) / 3
+                    if recent_avg > avg_transaction * 1.2:
+                        trend = "increasing"
+                    elif recent_avg < avg_transaction * 0.8:
+                        trend = "decreasing"
+                
+                # Generate more specific, actionable insights
                 insight_prompt = f"""
-                You are a smart financial coach analyzing spending patterns. Be encouraging and supportive.
+                You are a smart financial coach. Analyze this spending category and provide specific, concise, actionable insights.
 
-                SPENDING ANALYSIS:
+                SPENDING DATA:
                 Category: {category}
                 Total spent: ${total_amount:.2f}
                 Number of transactions: {len(amounts)}
                 Average per transaction: ${avg_transaction:.2f}
                 Percentage of total spending: {(total_amount/total_spending)*100:.1f}%
+                Trend: {trend}
 
                 TASK:
-                Provide a helpful, encouraging recommendation (2-3 sentences) about this spending category.
-                Focus on actionable advice, not judgment. Be supportive and motivating.
-                Suggest specific ways to optimize spending in this category if appropriate.
+                Provide a specific, encouraging insight with actionable advice. Include:
+                1. A friendly observation about the spending
+                2. A specific tip to save money in this category
+                3. An estimated annual savings potential
 
-                RESPONSE:
-                Provide only the recommendation text (no JSON, no formatting).
+                Examples:
+                - "You've spent $120 on coffee this month. Brewing at home could save you over $1,000 a year!"
+                - "Your entertainment spending is up 15% this month. Consider setting a monthly limit of $200 to save $600 annually."
+
+                Keep it conversational, specific, and motivating. Focus on one clear action.
                 """
                 
                 response = self.model.generate_content(
@@ -253,7 +319,7 @@ class FinancialAI:
                     total_amount=total_amount,
                     transaction_count=len(amounts),
                     avg_transaction=avg_transaction,
-                    trend="stable",  # TODO: Calculate actual trend
+                    trend=trend,
                     ai_recommendation=ai_recommendation
                 )
                 insights.append(insight)
@@ -262,80 +328,6 @@ class FinancialAI:
             
         except Exception as e:
             print(f"Gemini insights generation error: {e}")
-            return []
-    
-    async def generate_personalized_budget_advice(self, user_id: str, total_income: float, spending_by_category: dict) -> str:
-        """Generate personalized budget recommendations"""
-        try:
-            budget_prompt = f"""
-            You are a personal financial advisor. Create personalized budget advice.
-
-            USER FINANCIAL PROFILE:
-            Monthly Income: ${total_income:.2f}
-            Current Spending Breakdown:
-            {json.dumps(spending_by_category, indent=2)}
-
-            TASK:
-            Provide specific, actionable budget recommendations:
-            1. Identify spending categories that are too high
-            2. Suggest realistic percentage allocations
-            3. Recommend specific saving strategies
-            4. Give 3 concrete next steps
-
-            Keep advice encouraging and achievable. Focus on small improvements.
-            """
-            
-            response = self.model.generate_content(
-                budget_prompt,
-                generation_config=self.generation_config
-            )
-            
-            return response.text.strip()
-            
-        except Exception as e:
-            print(f"Budget advice generation error: {e}")
-            return "Focus on tracking your spending and identifying areas where you can save a little each month."
-    
-    async def generate_financial_goals_suggestions(self, user_profile: dict, current_savings: float) -> List[dict]:
-        """Suggest personalized financial goals"""
-        try:
-            goals_prompt = f"""
-            You are a financial coach suggesting realistic financial goals.
-
-            USER PROFILE:
-            Current Savings: ${current_savings:.2f}
-            Profile: {json.dumps(user_profile, indent=2)}
-
-            TASK:
-            Suggest 3-5 realistic financial goals with specific amounts and timeframes.
-            Consider user's current financial situation.
-
-            RESPONSE FORMAT (valid JSON array):
-            [
-                {{
-                    "goal_name": "Emergency Fund",
-                    "suggested_amount": 5000,
-                    "timeframe_months": 12,
-                    "reasoning": "Build 3-6 months of expenses as safety net"
-                }}
-            ]
-            """
-            
-            response = self.model.generate_content(
-                goals_prompt,
-                generation_config=self.generation_config
-            )
-            
-            # Parse JSON response
-            response_text = response.text.strip()
-            if response_text.startswith('```json'):
-                response_text = response_text.replace('```json', '').replace('```', '').strip()
-            
-            goals = json.loads(response_text)
-            return goals
-            
-        except Exception as e:
-            print(f"Goals suggestion error: {e}")
             return []
     
     # Keep the existing _guess_category method as fallback
@@ -409,6 +401,24 @@ class SyntheticDataGenerator:
         return transactions
 
 synthetic_data = SyntheticDataGenerator()
+
+# Helper function to parse Supabase data
+def parse_from_supabase(data):
+    """Parse Supabase data to match our Pydantic models"""
+    if not data:
+        return {}
+    
+    # Convert datetime strings to datetime objects
+    parsed = dict(data)
+    for key in ['date', 'created_at', 'processed_at']:
+        if key in parsed and parsed[key]:
+            if isinstance(parsed[key], str):
+                try:
+                    parsed[key] = datetime.fromisoformat(parsed[key].replace('Z', '+00:00'))
+                except:
+                    parsed[key] = datetime.now(timezone.utc)
+    
+    return parsed
 
 # API Routes
 @app.get("/")
@@ -534,19 +544,80 @@ async def get_spending_insights(user_id: str):
     try:
         # Get recent transactions
         result = supabase_admin.table('transactions').select("*").eq('user_id', user_id).execute()
+        
+        if not result.data:
+            # Return sample insights if no transactions
+            return {
+                "insights": [
+                    {
+                        "user_id": user_id,
+                        "category": "food",
+                        "total_amount": 0,
+                        "transaction_count": 0,
+                        "avg_transaction": 0,
+                        "trend": "stable",
+                        "ai_recommendation": "Start tracking your food expenses to get personalized insights! Most people can save $200-500 monthly by cooking at home more often."
+                    },
+                    {
+                        "user_id": user_id,
+                        "category": "entertainment",
+                        "total_amount": 0,
+                        "transaction_count": 0,
+                        "avg_transaction": 0,
+                        "trend": "stable",
+                        "ai_recommendation": "Track your entertainment spending to identify opportunities to save. Consider setting a monthly budget of $150-200 for movies, dining out, and subscriptions."
+                    }
+                ],
+                "total_transactions": 0,
+                "analysis_period": "no_data_yet",
+                "anomalies_present": False
+            }
+        
         transactions = [Transaction(**parse_from_supabase(t)) for t in result.data]
         
         # Generate AI insights
         insights = await financial_ai.generate_spending_insights(user_id, transactions)
         
+        # If no insights generated, provide fallback
+        if not insights:
+            insights = [
+                SpendingInsight(
+                    user_id=user_id,
+                    category="general",
+                    total_amount=0,
+                    transaction_count=len(transactions),
+                    avg_transaction=0,
+                    trend="stable",
+                    ai_recommendation="Great job tracking your expenses! Keep monitoring your spending patterns to identify areas for improvement."
+                )
+            ]
+        
         return {
             "insights": [insight.dict() for insight in insights],
             "total_transactions": len(transactions),
-            "analysis_period": "last_30_days"
+            "analysis_period": "last_30_days",
+            "anomalies_present": any(i.trend == "increasing" for i in insights)
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating insights: {str(e)}")
+        print(f"Insights generation error: {e}")
+        # Return fallback insights
+        return {
+            "insights": [
+                {
+                    "user_id": user_id,
+                    "category": "tracking",
+                    "total_amount": 0,
+                    "transaction_count": 0,
+                    "avg_transaction": 0,
+                    "trend": "stable",
+                    "ai_recommendation": "Welcome to Smart Financial Coach! Start adding transactions to get personalized insights and recommendations."
+                }
+            ],
+            "total_transactions": 0,
+            "analysis_period": "getting_started",
+            "anomalies_present": False
+        }
 
 @app.get("/api/users/{user_id}/dashboard")
 async def get_dashboard_data(user_id: str):
@@ -585,58 +656,224 @@ async def get_dashboard_data(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching dashboard data: {str(e)}")
 
-@app.get("/api/users/{user_id}/budget-advice")
-async def get_budget_advice(user_id: str):
-    """Get personalized budget recommendations"""
+# goal forecast
+@app.get("/api/users/{user_id}/goal-forecast")
+async def get_goal_forecast(user_id: str):
     try:
-        # Get user's financial data
-        accounts_data = await supabase.table('accounts').select('*').eq('user_id', user_id).execute()
-        transactions_data = await supabase.table('transactions').select('*').eq('user_id', user_id).execute()
+        # Try different possible goal table names
+        goals_result = None
+        for table_name in ['financial_goals', 'goals', 'user_goals']:
+            try:
+                goals_result = supabase_admin.table(table_name).select('*').eq('user_id', user_id).execute()
+                if goals_result.data:
+                    break
+            except:
+                continue
         
-        # Calculate income and spending
-        total_income = sum(acc['balance'] for acc in accounts_data.data if acc['account_type'] == 'checking')
-        
-        spending_by_category = {}
-        for txn in transactions_data.data:
-            if txn['transaction_type'] == 'debit':
-                category = txn.get('ai_category', 'other')
-                spending_by_category[category] = spending_by_category.get(category, 0) + float(txn['amount'])
-        
-        # Generate AI advice
-        advice = await financial_ai.generate_personalized_budget_advice(user_id, total_income, spending_by_category)
-        
-        return {
-            "user_id": user_id,
-            "budget_advice": advice,
-            "current_income": total_income,
-            "spending_breakdown": spending_by_category
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating budget advice: {str(e)}")
+        # If no goals found, create a sample goal for demonstration
+        if not goals_result or not goals_result.data:
+            # Create a sample emergency fund goal
+            sample_goal = {
+                'id': 'sample_emergency_fund',
+                'title': 'Emergency Fund',
+                'target_amount': 5000.0,
+                'current_amount': 0.0,
+                'goal_name': 'Emergency Fund'
+            }
+            goals_data = [sample_goal]
+        else:
+            goals_data = goals_result.data
 
-@app.get("/api/users/{user_id}/goal-suggestions")
-async def get_goal_suggestions(user_id: str):
-    """Get AI-powered financial goal suggestions"""
-    try:
-        # Get user profile and financial data
-        profile_data = await supabase.table('user_profiles').select('*').eq('id', user_id).single().execute()
-        accounts_data = await supabase.table('accounts').select('*').eq('user_id', user_id).execute()
-        
-        current_savings = sum(acc['balance'] for acc in accounts_data.data if acc['account_type'] == 'savings')
-        user_profile = profile_data.data if profile_data.data else {}
-        
-        # Generate goal suggestions
-        suggested_goals = await financial_ai.generate_financial_goals_suggestions(user_profile, current_savings)
+        # Get transactions to estimate monthly savings
+        txns_result = supabase_admin.table('transactions').select('*').eq('user_id', user_id).execute()
+
+        # Estimate monthly savings: income - expenses (last 30 days)
+        now = datetime.now(timezone.utc)
+        last_30 = []
+        for t in txns_result.data or []:
+            date_field = t.get('processed_at') or t.get('created_at') or t.get('date')
+            if date_field:
+                try:
+                    if isinstance(date_field, str):
+                        if 'T' in date_field:
+                            t_date = datetime.fromisoformat(date_field.replace('Z', '+00:00'))
+                        else:
+                            t_date = datetime.fromisoformat(date_field)
+                    else:
+                        t_date = date_field
+                    if t_date >= now - timedelta(days=30):
+                        last_30.append(t)
+                except:
+                    continue
+
+        income = sum(float(t.get('amount', 0)) for t in last_30 if t.get('transaction_type') in ['credit', 'deposit'])
+        expenses = sum(float(t.get('amount', 0)) for t in last_30 if t.get('transaction_type') in ['debit', 'payment', 'withdrawal'])
+        monthly_savings = max(income - expenses, 0)
+
+        forecasts = []
+        for g in goals_data:
+            target_amount = float(g.get('target_amount') or g.get('target', 0))
+            current_amount = float(g.get('current_amount') or g.get('current', 0))
+            forecast = await financial_ai.forecast_goal_progress(monthly_savings, target_amount, current_amount)
+            forecast.update({
+                'goal_id': g.get('id'),
+                'title': g.get('title') or g.get('goal_name') or 'Financial Goal',
+                'target_amount': target_amount,
+                'current_amount': current_amount,
+            })
+            forecasts.append(forecast)
         
         return {
-            "user_id": user_id,
-            "suggested_goals": suggested_goals,
-            "current_savings": current_savings
+            'user_id': user_id,
+            'monthly_savings_estimate': monthly_savings,
+            'forecasts': forecasts,
+            'total_goals': len(forecasts)
+        }
+    except Exception as e:
+        print(f"Goal forecast error: {e}")
+        # Return a fallback response
+        return {
+            'user_id': user_id,
+            'monthly_savings_estimate': 0,
+            'forecasts': [{
+                'goal_id': 'fallback',
+                'title': 'Set Your First Goal',
+                'target_amount': 1000,
+                'current_amount': 0,
+                'remaining': 1000,
+                'months_needed': None,
+                'status': 'no_savings',
+                'ai_guidance': 'Start by setting a financial goal in the Goals tab. Track your spending for a month to understand your savings potential, then create a realistic timeline.'
+            }],
+            'total_goals': 1
+        }
+
+# subscriptions detector
+@app.get("/api/users/{user_id}/subscriptions")
+async def get_subscriptions(user_id: str):
+    try:
+        txns_result = supabase_admin.table('transactions').select('*').eq('user_id', user_id).execute()
+        # Heuristic recurring detection by merchant + amount cadence
+        by_merchant = {}
+        for t in txns_result.data or []:
+            key = (t.get('merchant') or t.get('description') or '').strip().lower()
+            if not key:
+                continue
+            by_merchant.setdefault(key, []).append(t)
+
+        subscriptions = []
+        for merchant, items in by_merchant.items():
+            if len(items) < 2:
+                continue
+            amounts = [round(float(i.get('amount') or 0), 2) for i in items]
+            dates = [i.get('processed_at') or i.get('created_at') for i in items if i.get('processed_at') or i.get('created_at')]
+            dates = [datetime.fromisoformat(d.replace('Z', '+00:00')) if isinstance(d, str) else d for d in dates]
+            dates.sort()
+            if len(dates) >= 2:
+                intervals = [(dates[i] - dates[i-1]).days for i in range(1, len(dates))]
+                avg_interval = sum(intervals)/len(intervals)
+            else:
+                avg_interval = None
+
+            stable_amount = (max(amounts) - min(amounts)) <= (0.1 * (sum(amounts)/len(amounts) or 1))
+            monthly_like = avg_interval is not None and 20 <= avg_interval <= 40
+            if stable_amount and monthly_like:
+                last_date = dates[-1] if dates else None
+                monthly_total = sum(a for a in amounts) / max(len(amounts)/1.0, 1.0)
+                subscriptions.append({
+                    'merchant': merchant,
+                    'average_amount': round(sum(amounts)/len(amounts), 2),
+                    'avg_interval_days': avg_interval,
+                    'last_charge': last_date,
+                    'estimated_monthly_total': round(monthly_total, 2)
+                })
+
+        subscriptions.sort(key=lambda s: s['estimated_monthly_total'], reverse=True)
+        return {
+            'user_id': user_id,
+            'subscriptions': subscriptions,
+            'estimated_monthly_total': round(sum(s['estimated_monthly_total'] for s in subscriptions), 2)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error detecting subscriptions: {str(e)}")
+
+# Create comprehensive sample data for new users
+@app.post("/api/users/{user_id}/sample-data")
+async def create_sample_data(user_id: str):
+    try:
+        # Create realistic sample accounts
+        sample_accounts = [
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "account_name": "Chase Total Checking",
+                "account_type": "checking",
+                "balance": 3247.83,
+                "bank_name": "Chase Bank",
+                "account_number": "****1234",
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "account_name": "Chase Premier Savings",
+                "account_type": "savings",
+                "balance": 12450.00,
+                "bank_name": "Chase Bank",
+                "account_number": "****5678",
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+            }
+        ]
+        
+        # Create realistic sample goals
+        sample_goals = [
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "title": "Emergency Fund",
+                "target_amount": 15000.00,
+                "current_amount": 12450.00,
+                "target_date": (datetime.now(timezone.utc) + timedelta(days=120)).isoformat(),
+                "is_active": True,
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "title": "Vacation Fund",
+                "target_amount": 5000.00,
+                "current_amount": 1200.00,
+                "target_date": (datetime.now(timezone.utc) + timedelta(days=180)).isoformat(),
+                "is_active": True,
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+            }
+        ]
+        
+        # Generate sample transactions using existing system
+        sample_transactions = synthetic_data.generate_sample_transactions(user_id, 30)
+        
+        # Insert sample data
+        for account in sample_accounts:
+            supabase_admin.table('accounts').insert(account).execute()
+            
+        for transaction in sample_transactions:
+            transaction_dict = transaction.dict()
+            transaction_dict['processed_at'] = transaction_dict['date'].isoformat()
+            supabase_admin.table('transactions').insert(transaction_dict).execute()
+            
+        for goal in sample_goals:
+            supabase_admin.table('financial_goals').insert(goal).execute()
+        
+        return {
+            "message": "Comprehensive sample data created successfully", 
+            "accounts": len(sample_accounts), 
+            "transactions": len(sample_transactions), 
+            "goals": len(sample_goals),
+            "data_period": "Last 30 days"
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating goal suggestions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating sample data: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

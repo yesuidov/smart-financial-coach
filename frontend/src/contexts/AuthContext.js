@@ -12,21 +12,45 @@ export function AuthProvider({ children }) {
   const [profile, setProfile] = useState(null)
   const [loading, setLoading] = useState(true)
   const [session, setSession] = useState(null)
+  const [authError, setAuthError] = useState(null)
+  const [retryCount, setRetryCount] = useState(0)
 
   useEffect(() => {
-    // Get initial session
+    // Get initial session with proper error handling
     const getInitialSession = async () => {
-      const { data: { session }, error } = await supabase.auth.getSession()
-      if (error) {
-        console.error('Error getting session:', error)
-      } else {
-        setSession(session)
-        setUser(session?.user ?? null)
-        if (session?.user) {
-          await fetchUserProfile(session.user.id)
+      try {
+        setAuthError(null);
+        const { data: { session }, error } = await supabase.auth.getSession();
+
+        if (error) {
+          console.error('Error getting session:', error);
+          setAuthError({
+            type: 'session_fetch',
+            message: 'Unable to verify your session. Please sign in again.',
+            retryable: true
+          });
+        } else {
+          setSession(session);
+          setUser(session?.user ?? null);
+          if (session?.user) {
+            try {
+              await fetchUserProfile(session.user.id);
+            } catch (profileError) {
+              // Profile error is handled in fetchUserProfile
+              console.error('Profile fetch failed during session init:', profileError);
+            }
+          }
         }
+      } catch (error) {
+        console.error('Session initialization error:', error);
+        setAuthError({
+          type: 'session_init',
+          message: 'Unable to initialize your session. Please refresh the page.',
+          retryable: true
+        });
+      } finally {
+        setLoading(false);
       }
-      setLoading(false)
     }
 
     getInitialSession()
@@ -51,22 +75,44 @@ export function AuthProvider({ children }) {
     return () => subscription.unsubscribe()
   }, [])
 
-  const fetchUserProfile = async (userId) => {
+  const fetchUserProfile = async (userId, attempt = 1) => {
+    const maxAttempts = 3;
+    
     try {
+      setAuthError(null);
+      
       const { data, error } = await supabase
         .from('user_profiles')
         .select('*')
         .eq('id', userId)
-        .single()
+        .single();
 
-      if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
-        console.error('Error fetching profile:', error)
-        return
+      if (error) {
+        if (error.code === 'PGRST116') {
+          // No profile found - user needs to complete onboarding
+          setProfile(null);
+          return;
+        }
+        
+        // Retry on network errors with exponential backoff
+        if (attempt < maxAttempts && (error.message.includes('network') || error.message.includes('timeout'))) {
+          console.log(`Retrying profile fetch (attempt ${attempt + 1}/${maxAttempts})`);
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+          return fetchUserProfile(userId, attempt + 1);
+        }
+        
+        throw error;
       }
 
-      setProfile(data)
+      setProfile(data);
     } catch (error) {
-      console.error('Profile fetch error:', error)
+      console.error('Profile fetch error:', error);
+      setAuthError({
+        type: 'profile_fetch',
+        message: 'Unable to load your profile. Please check your connection and try again.',
+        retryable: attempt < maxAttempts
+      });
+      throw error;
     }
   }
 
@@ -177,18 +223,42 @@ export function AuthProvider({ children }) {
     }
   }
 
+  const retryAuth = async () => {
+    setAuthError(null);
+    setRetryCount(prev => prev + 1);
+    
+    if (user) {
+      try {
+        await fetchUserProfile(user.id);
+      } catch (error) {
+        console.error('Retry failed:', error);
+      }
+    } else {
+      // Retry session initialization
+      window.location.reload();
+    }
+  };
+
+  const clearAuthError = () => {
+    setAuthError(null);
+  };
+
   const value = {
     user,
     profile,
     session,
     loading,
+    authError,
+    retryCount,
     signUp,
     signIn,
     signOut,
     updateProfile,
     resetPassword,
     fetchUserProfile,
-    createSampleData
+    createSampleData,
+    retryAuth,
+    clearAuthError
   }
 
   return (
