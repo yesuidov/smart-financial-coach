@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../../lib/supabase';
 import { dataService } from '../../services/DataService';
+import CreateGoal from '../Goals/CreateGoal';
 
 const API_BASE = process.env.REACT_APP_API_URL || process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
 
@@ -17,6 +17,7 @@ const Dashboard = () => {
   const [forecast, setForecast] = useState(null);
   const [lastFetchTime, setLastFetchTime] = useState(null);
   const [creatingSampleData, setCreatingSampleData] = useState(false);
+  const [showCreateGoal, setShowCreateGoal] = useState(false);
 
   const fetchDashboardData = useCallback(async (forceRefresh = false) => {
     if (!user) return;
@@ -163,6 +164,12 @@ const Dashboard = () => {
     } finally {
       setCreatingSampleData(false);
     }
+  };
+
+  const handleGoalCreated = async (newGoal) => {
+    setShowCreateGoal(false);
+    // Refresh dashboard data to include the new goal
+    await fetchDashboardData(true);
   };
 
   const formatCurrency = (amount) => {
@@ -562,9 +569,15 @@ const Dashboard = () => {
           <div className="space-y-8">
             <div className="text-center">
               <h2 className="text-3xl font-bold text-gray-900 mb-4">🎯 Your Financial Goals</h2>
-              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-600 max-w-2xl mx-auto mb-6">
                 Track your progress and stay motivated to achieve your financial dreams
               </p>
+              <button
+                onClick={() => setShowCreateGoal(true)}
+                className="bg-gradient-to-r from-blue-500 to-purple-600 text-white px-8 py-3 rounded-xl font-semibold hover:shadow-lg transition-all duration-200"
+              >
+                + Create New Goal
+              </button>
             </div>
 
             {dashboardData.goals.length > 0 ? (
@@ -722,7 +735,7 @@ const Dashboard = () => {
                     <h4 className="text-lg font-semibold text-gray-900 mb-2">No Financial Goals Set</h4>
                     <p className="text-gray-600 mb-6">Set your first financial goal to get personalized forecasts and AI guidance.</p>
                     <button 
-                      onClick={() => setActiveTab('goals')}
+                      onClick={() => setShowCreateGoal(true)}
                       className="bg-gradient-to-r from-blue-500 to-purple-600 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-lg transition-all duration-200"
                     >
                       Create Your First Goal
@@ -757,6 +770,14 @@ const Dashboard = () => {
           </div>
         </div>
       </footer>
+
+      {/* Create Goal Modal */}
+      {showCreateGoal && (
+        <CreateGoal
+          onGoalCreated={handleGoalCreated}
+          onCancel={() => setShowCreateGoal(false)}
+        />
+      )}
     </div>
   );
 };
