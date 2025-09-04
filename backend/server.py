@@ -105,7 +105,7 @@ def prepare_for_supabase(data):
                 data[key] = value.isoformat()
     return data
 
-def parse_from_supabase(item):
+def dccx(item):
     """Parse datetime strings from Supabase back to Python objects and map field names"""
     if isinstance(item, dict):
         # Map Supabase field names back to our model
