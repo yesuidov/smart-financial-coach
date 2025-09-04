@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 
 const Dashboard = () => {
   const { user, profile, signOut } = useAuth();
+  const navigate = useNavigate();
   const [dashboardData, setDashboardData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -191,9 +193,9 @@ const Dashboard = () => {
               </div>
               <div className="relative">
                 <button
-                  onClick={signOut}
+                  onClick={() => navigate('/profile')}
                   className="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center text-white font-bold text-lg shadow-lg hover:shadow-xl transition-all duration-200"
-                  title="Sign Out"
+                  title="Profile"
                 >
                   {(profile?.display_name || profile?.first_name || 'U').charAt(0).toUpperCase()}
                 </button>

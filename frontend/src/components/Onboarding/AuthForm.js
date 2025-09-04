@@ -1,8 +1,13 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 
-const AuthForm = ({ onNext, onBack }) => {
-  const [mode, setMode] = useState('signup'); // 'signup' or 'login'
+const AuthForm = ({ mode: initialMode = 'signup', onNext, onBack }) => {
+  const [mode, setMode] = useState(initialMode); // 'signup' or 'login'
+  
+  // Keep local mode in sync with prop changes (e.g., when user clicks "Sign In" on Welcome)
+  React.useEffect(() => {
+    setMode(initialMode);
+  }, [initialMode]);
   const [formData, setFormData] = useState({
     email: '',
     password: '',
