@@ -68,7 +68,7 @@ class Transaction(BaseModel):
     description: str
     category: Optional[str] = None
     ai_category: Optional[str] = None
-    date: datetime
+    date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     merchant: Optional[str] = None
     account_type: str = "checking"  # checking, savings, credit_card
     transaction_type: str = "debit"  # debit, credit
@@ -394,15 +394,16 @@ class HuggingFaceFinancialAI:
             
         try:
             # Use a smaller, faster model for text generation
-            self.text_generator = pipeline(
-                "text-generation",
-                model="microsoft/DialoGPT-medium",
-                max_length=200,
-                do_sample=True,
-                temperature=0.7,
-                pad_token_id=50256
-            )
-            set_seed(42)  # For reproducible results
+            # self.text_generator = pipeline(
+            #     "text-generation",
+            #     model="microsoft/DialoGPT-medium",
+            #     max_length=200,
+            #     do_sample=True,
+            #     temperature=0.7,
+            #     pad_token_id=50256
+            # )
+            # set_seed(42)  # For reproducible results
+            self.text_generator = None  # Temporarily disabled
         except Exception as e:
             print(f"Failed to initialize Hugging Face model: {e}")
             self.text_generator = None
@@ -559,6 +560,90 @@ class SyntheticDataGenerator:
 
 synthetic_data = SyntheticDataGenerator()
 
+# Function to generate insights directly from raw transaction data
+async def generate_insights_from_raw_data(user_id: str, raw_transactions: list) -> List[SpendingInsight]:
+    """Generate insights directly from raw Supabase transaction data"""
+    if not raw_transactions:
+        return []
+    
+    # Aggregate spending by category
+    category_spending = {}
+    total_spending = 0
+    
+    for transaction in raw_transactions:
+        # Handle different possible field names
+        amount = float(transaction.get('amount', 0))
+        transaction_type = transaction.get('transaction_type', 'debit')
+        
+        # Only process expense transactions
+        if transaction_type in ['debit', 'payment', 'withdrawal'] and amount > 0:
+            # Get category from various possible fields
+            category = (transaction.get('ai_category') or 
+                       transaction.get('category') or 
+                       transaction.get('merchant', 'other').lower() or 
+                       'other')
+            
+            # Normalize category names
+            if 'starbucks' in category.lower() or 'coffee' in category.lower():
+                category = 'coffee'
+            elif 'food' in category.lower() or 'restaurant' in category.lower() or 'dining' in category.lower():
+                category = 'food'
+            elif 'entertainment' in category.lower() or 'netflix' in category.lower() or 'streaming' in category.lower():
+                category = 'entertainment'
+            elif 'transportation' in category.lower() or 'uber' in category.lower() or 'gas' in category.lower():
+                category = 'transportation'
+            elif 'shopping' in category.lower() or 'amazon' in category.lower() or 'target' in category.lower():
+                category = 'shopping'
+            
+            if category not in category_spending:
+                category_spending[category] = []
+            category_spending[category].append(amount)
+            total_spending += amount
+    
+    insights = []
+    for category, amounts in category_spending.items():
+        total_amount = sum(amounts)
+        avg_transaction = total_amount / len(amounts)
+        
+        # Calculate annual projection
+        annual_projection = total_amount * 12
+        
+        # Generate specific, actionable insights with annual projections
+        if category == 'coffee':
+            ai_recommendation = f"You've spent ${total_amount:.0f} on coffee this month across {len(amounts)} visits. That's ${annual_projection:.0f} annually! Brewing at home could save you ${annual_projection * 0.7:.0f} per year."
+        elif category == 'food':
+            ai_recommendation = f"Your food spending is ${total_amount:.0f} this month (${annual_projection:.0f} annually). Cooking at home 2 more times per week could save you ${annual_projection * 0.3:.0f} per year."
+        elif category == 'entertainment':
+            ai_recommendation = f"Entertainment costs: ${total_amount:.0f} this month (${annual_projection:.0f} annually). Consider setting a monthly budget of ${total_amount * 0.8:.0f} to save ${annual_projection * 0.2:.0f} per year."
+        elif category == 'transportation':
+            ai_recommendation = f"Transportation spending: ${total_amount:.0f} this month (${annual_projection:.0f} annually). Carpooling or using public transit could reduce this by 20-30%."
+        elif category == 'shopping':
+            ai_recommendation = f"Shopping expenses: ${total_amount:.0f} this month (${annual_projection:.0f} annually). Consider implementing a 24-hour rule before non-essential purchases."
+        else:
+            ai_recommendation = f"Your {category} spending is ${total_amount:.0f} this month (${annual_projection:.0f} annually). Review this category to identify potential savings opportunities."
+        
+        # Determine trend
+        trend = "stable"
+        if len(amounts) >= 3:
+            recent_avg = sum(amounts[-3:]) / 3
+            if recent_avg > avg_transaction * 1.2:
+                trend = "increasing"
+            elif recent_avg < avg_transaction * 0.8:
+                trend = "decreasing"
+        
+        insight = SpendingInsight(
+            user_id=user_id,
+            category=category,
+            total_amount=total_amount,
+            transaction_count=len(amounts),
+            avg_transaction=avg_transaction,
+            trend=trend,
+            ai_recommendation=ai_recommendation
+        )
+        insights.append(insight)
+    
+    return insights
+
 # Helper function to parse Supabase data
 def parse_from_supabase(data):
     """Parse Supabase data to match our Pydantic models"""
@@ -567,6 +652,13 @@ def parse_from_supabase(data):
     
     # Convert datetime strings to datetime objects
     parsed = dict(data)
+    
+    # Handle date field mapping - Supabase might use processed_at instead of date
+    if 'processed_at' in parsed and 'date' not in parsed:
+        parsed['date'] = parsed['processed_at']
+    elif 'created_at' in parsed and 'date' not in parsed:
+        parsed['date'] = parsed['created_at']
+    
     for key in ['date', 'created_at', 'processed_at']:
         if key in parsed and parsed[key]:
             if isinstance(parsed[key], str):
@@ -574,6 +666,16 @@ def parse_from_supabase(data):
                     parsed[key] = datetime.fromisoformat(parsed[key].replace('Z', '+00:00'))
                 except:
                     parsed[key] = datetime.now(timezone.utc)
+            elif isinstance(parsed[key], datetime):
+                # Already a datetime object, keep as is
+                pass
+            else:
+                # Fallback to current time
+                parsed[key] = datetime.now(timezone.utc)
+    
+    # Ensure date field exists
+    if 'date' not in parsed or not parsed['date']:
+        parsed['date'] = datetime.now(timezone.utc)
     
     return parsed
 
@@ -585,6 +687,22 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc)}
+
+@app.get("/api/debug/transactions/{user_id}")
+async def debug_transactions(user_id: str):
+    """Debug endpoint to see raw transaction data"""
+    try:
+        result = supabase_admin.table('transactions').select("*").eq('user_id', user_id).execute()
+        if result.data:
+            return {
+                "count": len(result.data),
+                "first_transaction": result.data[0],
+                "all_transactions": result.data
+            }
+        else:
+            return {"count": 0, "message": "No transactions found"}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/api/users", response_model=User)
 async def create_user(user_data: dict):
@@ -731,12 +849,17 @@ async def get_spending_insights(user_id: str):
                 "anomalies_present": False
             }
         
-        transactions = [Transaction(**parse_from_supabase(t)) for t in result.data]
-        print(f"Insights: Parsed {len(transactions)} transactions")
-        
-        # Generate AI insights
-        insights = await financial_ai.generate_spending_insights(user_id, transactions)
-        print(f"Insights: Generated {len(insights) if insights else 0} insights")
+        # Process raw transaction data directly to avoid parsing issues
+        if result.data:
+            print(f"Insights: Found {len(result.data)} raw transactions")
+            print(f"Insights: First transaction structure: {result.data[0]}")
+            
+            # Generate insights directly from raw data
+            insights = await generate_insights_from_raw_data(user_id, result.data)
+            print(f"Insights: Generated {len(insights) if insights else 0} insights")
+        else:
+            print("Insights: No transaction data found")
+            insights = []
         
         # If no insights generated, provide fallback
         if not insights:
@@ -745,7 +868,7 @@ async def get_spending_insights(user_id: str):
                     user_id=user_id,
                     category="general",
                     total_amount=0,
-                    transaction_count=len(transactions),
+                    transaction_count=len(result.data) if result.data else 0,
                     avg_transaction=0,
                     trend="stable",
                     ai_recommendation="Great job tracking your expenses! Keep monitoring your spending patterns to identify areas for improvement."
@@ -754,7 +877,7 @@ async def get_spending_insights(user_id: str):
         
         return {
             "insights": [insight.dict() for insight in insights],
-            "total_transactions": len(transactions),
+            "total_transactions": len(result.data) if result.data else 0,
             "analysis_period": "last_30_days",
             "anomalies_present": any(i.trend == "increasing" for i in insights)
         }
@@ -990,7 +1113,7 @@ async def create_sample_data(user_id: str):
         sample_accounts = [
             {
                 "id": str(uuid.uuid4()),
-                "user_id": user_id,
+            "user_id": user_id,
                 "account_name": "Chase Total Checking",
                 "account_type": "checking",
                 "balance": 3247.83,
@@ -1127,7 +1250,7 @@ async def create_goal(user_id: str, request: Request):
         else:
             print(f"Failed to create goal: {result}")
             raise HTTPException(status_code=500, detail="Failed to create goal")
-            
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating goal: {str(e)}")
 
